@@ -133,7 +133,7 @@ inline void Game::getAccelerometerValues(float* pitch, float* roll)
 
 inline void Game::getSensorValues(float* accelX, float* accelY, float* accelZ, float* gyroX, float* gyroY, float* gyroZ)
 {
-    return Platform::getSensorValues(accelX, accelY, accelZ, gyroX, gyroY, gyroZ);
+    Platform::getSensorValues(accelX, accelY, accelZ, gyroX, gyroY, gyroZ);
 }
 
 inline unsigned int Game::getGamepadCount() const
