@@ -159,7 +159,10 @@ void FBXSceneEncoder::loadScene(FbxScene* fbxScene)
     if (rootNode)
     {
         print("Triangulate.");
-        triangulateRecursive(rootNode);
+        FbxGeometryConverter converter(rootNode->GetFbxManager());
+        converter.Triangulate(fbxScene, true);
+        //triangulateRecursive(rootNode);
+        
 
         print("Load nodes.");
         // Don't include the FBX root node in the GPB.
@@ -568,17 +571,26 @@ void FBXSceneEncoder::transformNode(FbxNode* fbxNode, Node* node)
         }
         else if(fbxNode->GetCamera())
         {
-            // TODO: use the EvaluateLocalTransform() function for the transformations for the camera
-            /*
-             * the current implementation ignores pre- and postrotation among others (usually happens with fbx-export from blender)
-             *
-             * Some info for a future implementation:
-             * according to the fbx-documentation the camera's forward vector
-             * points along a node's positive X axis.
-             * so we have to correct it if we use the EvaluateLocalTransform-function
-             * just rotating it by 90° around the Y axis (similar to above) doesn't work
-             */
-            matrix.SetTRS(fbxNode->LclTranslation.Get(), fbxNode->LclRotation.Get(), fbxNode->LclScaling.Get());
+			/*
+			* according to the fbx-documentation the camera's forward vector
+			* points along a node's positive X axis.
+			* so we have to rotate it by 90 around the Y-axis to correct it.
+			*/
+			if (fbxNode->RotationActive.Get())
+			{
+				const FbxVector4& postRotation = fbxNode->PostRotation.Get();
+				fbxNode->SetPostRotation(FbxNode::eSourcePivot, FbxVector4(postRotation.mData[0],
+					postRotation.mData[1] + 90.0,
+					postRotation.mData[2]));
+			}
+			else
+			{
+				// usually for the fbx-exporter in Blender 2.75
+				// if rotation is deactivated we have to rotate the local transform in 90°
+				rotateAdjust.SetR(FbxVector4(0, 90.0, 0.0));
+			}
+
+			matrix = fbxNode->EvaluateLocalTransform() * rotateAdjust;
         }
         
         copyMatrix(matrix, m);
@@ -725,9 +737,13 @@ void FBXSceneEncoder::loadCamera(FbxNode* fbxNode, Node* node)
         id.append("_Camera");
         camera->setId(id);
     }
+
+	// Clip planes have to by divided by the forward scale of the camera (x-axis) to get right values
+	float scale = (float)fbxCamera->GetNode()->LclScaling.Get()[0];
+
     camera->setAspectRatio(getAspectRatio(fbxCamera));
-    camera->setNearPlane((float)fbxCamera->NearPlane.Get());
-    camera->setFarPlane((float)fbxCamera->FarPlane.Get());
+	camera->setNearPlane((float)fbxCamera->NearPlane.Get() / scale);
+	camera->setFarPlane((float)fbxCamera->FarPlane.Get() / scale);
 
     if (fbxCamera->ProjectionType.Get() == FbxCamera::eOrthogonal)
     {
@@ -811,6 +827,7 @@ void FBXSceneEncoder::loadLight(FbxNode* fbxNode, Node* node)
                 light->setPointLight();
                 light->setRange(range);
             }
+            break;
         }
         case FbxLight::eDirectional:
         {
@@ -839,7 +856,7 @@ void FBXSceneEncoder::loadLight(FbxNode* fbxNode, Node* node)
 void FBXSceneEncoder::loadModel(FbxNode* fbxNode, Node* node)
 {
     FbxMesh* fbxMesh = fbxNode->GetMesh();
-    if (!fbxMesh)
+	if (!fbxMesh || fbxMesh->GetPolygonVertexCount() == 0)
     {
         return;
     }
@@ -1239,7 +1256,8 @@ Mesh* FBXSceneEncoder::loadMesh(FbxMesh* fbxMesh)
     const size_t meshpartsSize = meshParts.size();
     for (size_t i = 0; i < meshpartsSize; ++i)
     {
-        mesh->addMeshPart(meshParts[i]);
+        if (meshParts[i]->getIndicesCount() > 0)
+            mesh->addMeshPart(meshParts[i]);
     }
 
     // The order that the vertex elements are add to the list matters.
@@ -1289,6 +1307,7 @@ Mesh* FBXSceneEncoder::loadMesh(FbxMesh* fbxMesh)
     return mesh;
 }
 
+/*
 void FBXSceneEncoder::triangulateRecursive(FbxNode* fbxNode)
 {
     // Triangulate all NURBS, patch and mesh under this node recursively.
@@ -1302,7 +1321,7 @@ void FBXSceneEncoder::triangulateRecursive(FbxNode* fbxNode)
             type == FbxNodeAttribute::ePatch)
         {
             FbxGeometryConverter converter(fbxNode->GetFbxManager());
-            converter.TriangulateInPlace(fbxNode);
+            converter.T
         }
     }
 
@@ -1312,6 +1331,7 @@ void FBXSceneEncoder::triangulateRecursive(FbxNode* fbxNode)
         triangulateRecursive(fbxNode->GetChild(childIndex));
     }
 }
+ */
 
 // Functions
 

@@ -76,13 +76,8 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
 {
     GP_ASSERT(bindings.size() > 0);
 
-    if (bindings[0].getFunctionName() == "lua_AudioListener_static_getInstance")
-    {
-        int i = 0;
-    }
-
     // Print the function signature.
-    o << "int " << bindings[0].getFunctionName() << "(lua_State* state)\n";
+    o << "static int " << bindings[0].getFunctionName() << "(lua_State* state)\n";
     o << "{\n";
 
     if (bindings.size() == 1 && bindings[0].type == FunctionBinding::MEMBER_VARIABLE)
@@ -149,7 +144,6 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
         }
         outputReturnValue(o, bindings[0], 2);
         o << "    }\n";
-        o << "}\n\n";
     }
     else if (bindings.size() == 1 && 
         (bindings[0].type == FunctionBinding::STATIC_VARIABLE ||
@@ -202,10 +196,10 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
             switch (bindings[0].returnParam.kind)
             {
             case FunctionBinding::Param::KIND_POINTER:
-                o << "        void* returnPtr = (void*)";
+                o << "        void* returnPtr = ((void*)";
                 if (bindings[0].classname.size() > 0)
                     o << bindings[0].classname << "::";
-                o << bindings[0].name << ";\n";
+                o << bindings[0].name << ");\n";
                 break;
             case FunctionBinding::Param::KIND_VALUE:
                 o << "        void* returnPtr = (void*)new " << bindings[0].returnParam << "(";
@@ -233,7 +227,6 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
         }
         outputReturnValue(o, bindings[0], 2);
         o << "    }\n";
-        o << "}\n\n";
     }
     else if (bindings.size() == 1 && bindings[0].type == FunctionBinding::MEMBER_CONSTANT)
     {
@@ -270,7 +263,6 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
             o << "    " << bindings[0].returnParam << " result = instance->" << bindings[0].name << ";\n";
         }
         outputReturnValue(o, bindings[0], 1);
-        o << "}\n\n";
     }
     else if (bindings.size() == 1 && 
         (bindings[0].type == FunctionBinding::STATIC_CONSTANT ||
@@ -290,10 +282,10 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
             switch (bindings[0].returnParam.kind)
             {
             case FunctionBinding::Param::KIND_POINTER:
-                o << "    void* returnPtr = (void*)";
+                o << "    void* returnPtr = ((void*)";
                 if (bindings[0].classname.size() > 0)
                     o << bindings[0].classname << "::";
-                o << bindings[0].name << ";\n";
+                o << bindings[0].name << ");\n";
                 break;
             case FunctionBinding::Param::KIND_VALUE:
                 o << "    void* returnPtr = (void*)new " << bindings[0].returnParam << "(";
@@ -320,7 +312,6 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
             o << bindings[0].name << ";\n";
         }
         outputReturnValue(o, bindings[0], 1);
-        o << "}\n\n";
     }
     else
     {
@@ -341,11 +332,11 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
                 }
             }
         }
-        
+
         // Get the parameter count.
         o << "    // Get the number of parameters.\n";
         o << "    int paramCount = lua_gettop(state);\n\n";
-        
+
         // Retrieve all the parameters and attempt to match them to a valid binding,
         // notifying the user if the number of parameters is invalid.
         o << "    // Attempt to match the parameters to a valid binding.\n";
@@ -376,14 +367,14 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
                 indent(o, 3);
                 o << "lua_error(state);\n";
             }
-            
+
             o << "            break;\n";
             o << "        }\n";
         }
-        
+
         o << "        default:\n";
         o << "        {\n";
-        o << "            lua_pushstring(state, \"Invalid number of parameters (expected "; 
+        o << "            lua_pushstring(state, \"Invalid number of parameters (expected ";
         for (iter = paramCounts.begin(), checkCount = 1; iter != paramCounts.end(); iter++)
         {
             if (checkCount == paramCounts.size() && paramCounts.size() > 1)
@@ -400,8 +391,9 @@ void FunctionBinding::write(ostream& o, const vector<FunctionBinding>& bindings)
         o << "        }\n";
         o << "    }\n";
         o << "    return 0;\n";
-        o << "}\n\n";
     }
+
+    o << "}\n\n";
 }
 
 bool FunctionBinding::signaturesMatch(const FunctionBinding& b1, const FunctionBinding& b2)
@@ -548,9 +540,11 @@ static inline void outputLuaTypeCheck(ostream& o, int index, const FunctionBindi
         }
         break;
     case FunctionBinding::Param::TYPE_STRING:
-    case FunctionBinding::Param::TYPE_ENUM:
         o << "(lua_type(state, " << index << ") == LUA_TSTRING || ";
         o << "lua_type(state, " << index << ") == LUA_TNIL)";
+        break;
+    case FunctionBinding::Param::TYPE_ENUM:
+        o << "lua_type(state, " << index << ") == LUA_TNUMBER";
         break;
     case FunctionBinding::Param::TYPE_OBJECT:
         o << "(lua_type(state, " << index << ") == LUA_TUSERDATA || ";
@@ -631,13 +625,15 @@ static inline void outputBindingInvocation(ostream& o, const FunctionBinding& b,
         }
 
         // For functions that return objects, create the appropriate user data in Lua.
+        bool needsExtraClosingBrace = false;
         if (b.returnParam.type == FunctionBinding::Param::TYPE_CONSTRUCTOR || b.returnParam.type == FunctionBinding::Param::TYPE_OBJECT)
         {
+            needsExtraClosingBrace = true;
             indent(o, indentLevel);
             switch (b.returnParam.kind)
             {
             case FunctionBinding::Param::KIND_POINTER:
-                o << "void* returnPtr = (void*)";
+                o << "void* returnPtr = ((void*)";
                 break;
             case FunctionBinding::Param::KIND_VALUE:
                 o << "void* returnPtr = (void*)new " << b.returnParam << "(";
@@ -688,8 +684,8 @@ static inline void outputBindingInvocation(ostream& o, const FunctionBinding& b,
                 o << ", ";
         }
 
-        // Output the matching parenthesis for the case where a non-pointer object is being returned.
-        if (b.returnParam.type == FunctionBinding::Param::TYPE_OBJECT && b.returnParam.kind != FunctionBinding::Param::KIND_POINTER)
+        // Add the closing brace from the casting, if neccessary
+        if (needsExtraClosingBrace)
             o << ")";
 
         o << ");\n";
@@ -804,7 +800,7 @@ static inline void outputGetParam(ostream& o, const FunctionBinding::Param& p, i
         break;
     case FunctionBinding::Param::TYPE_ENUM:
         indent(o, indentLevel);
-        o << p << " param" << i+1 << " = (" << p << ")lua_enumFromString_" << Generator::getInstance()->getUniqueNameFromRef(p.info) << "(luaL_checkstring(state, " << paramIndex << "));\n";
+        o << p << " param" << i+1 << " = (" << p << ")luaL_checkint(state, " << paramIndex << ");\n";
         break;
     case FunctionBinding::Param::TYPE_UNRECOGNIZED:
         // Attempt to retrieve the unrecognized type as an unsigned integer.
@@ -978,7 +974,7 @@ static inline void outputReturnValue(ostream& o, const FunctionBinding& b, int i
         o << "lua_pushnumber(state, result);\n";
         break;
     case FunctionBinding::Param::TYPE_ENUM:
-        o << "lua_pushstring(state, lua_stringFromEnum_" << Generator::getInstance()->getUniqueNameFromRef(b.returnParam.info) << "(result));\n";
+        o << "lua_pushnumber(state, (int)result);\n";
         break;
     case FunctionBinding::Param::TYPE_STRING:
         if (b.returnParam.info == "string")

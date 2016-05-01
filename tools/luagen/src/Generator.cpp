@@ -71,6 +71,14 @@ string Generator::getIdentifier(string refId)
     return refId;
 }
 
+string Generator::getRefId(string classname)
+{
+    map<string, ClassBinding>::iterator itr = _classes.find(classname);
+    if (itr == _classes.end())
+        return string();
+    return itr->second.refId;
+}
+
 string Generator::getClassNameAndNamespace(string classname, string* ns)
 {
     size_t index = classname.find("::");
@@ -251,6 +259,9 @@ void Generator::run(string inDir, string outDir, string* bindingNS)
     // Resolve all inherited include files.
     resolveInheritedIncludes();
 
+    // Build class hierarchy pairs
+    buildClassHierarchyPairs();
+
     // Generate the script bindings.
     generateBindings(bindingNS);
 
@@ -417,12 +428,12 @@ void Generator::getClass(XMLElement* classNode, const string& name)
     // Create the class binding object that we will store the function bindings in (name -> binding).
     ClassBinding classBinding(name, refId);
 
-    // Store the mapping between the ref id and the class's fully qualified name.
-    Generator::getInstance()->setIdentifier(refId, classBinding.classname);
-
     // Check if we should ignore this class.
     if (getScriptFlag(classNode) == "ignore")
         return;
+
+    // Store the mapping between the ref id and the class's fully qualified name.
+    Generator::getInstance()->setIdentifier(refId, classBinding.classname);
 
     // Get the include header for the original class declaration.
     XMLElement* includeElement = classNode->FirstChildElement("includes");
@@ -836,7 +847,7 @@ void Generator::getTypedefs(XMLElement* fileNode, string ns)
             return;
         }
 
-        // Process the enums.
+        // Process the typedefs.
         if (strcmp(kind, "typedef") == 0)
         {
             XMLElement* e = node->FirstChildElement("memberdef");
@@ -1260,7 +1271,7 @@ void Generator::resolveIncludes(const ClassBinding& c)
                 derivedIncludes.insert(*iter);
             }
         }
-        
+
         derived.push_back(cb);
     }
 
@@ -1271,6 +1282,28 @@ void Generator::resolveIncludes(const ClassBinding& c)
     }
 }
 
+void Generator::addDerivedIncludes(const ClassBinding* c, set<string>* baseIncludes)
+{
+    for (unsigned int i = 0, count = c->derived.size(); i < count; ++i)
+    {
+        string derivedClassName = getIdentifier(c->derived[i]);
+        if (_classes.find(derivedClassName) == _classes.end())
+            continue;
+
+        ClassBinding* derivedClass = &_classes[derivedClassName];
+        if (derivedClass)
+        {
+            baseIncludes->insert(derivedClass->include);
+            addDerivedIncludes(derivedClass, baseIncludes);
+
+            if (_includes.find(derivedClass->include) != _includes.end())
+            {
+                addDerivedIncludes(derivedClass, &_includes[derivedClass->include]);
+            }
+        }
+    }
+}
+
 void Generator::resolveInheritedIncludes()
 {
     // Go through the class inheritance tree and update each class's 
@@ -1278,6 +1311,17 @@ void Generator::resolveInheritedIncludes()
     for (unsigned int i = 0; i < _topLevelBaseClasses.size(); i++)
     {
         resolveIncludes(_classes[_topLevelBaseClasses[i]]);
+    }
+
+    // Add derived classes (recursively) to the list of base class includes.
+    // This is neccessary for the auto-generated conversion functions for bases classes.
+    for (unsigned int i = 0; i < _topLevelBaseClasses.size(); i++)
+    {
+        ClassBinding& c = _classes[_topLevelBaseClasses[i]];
+        if (_includes.find(c.include) != _includes.end())
+        {
+            addDerivedIncludes(&c, &_includes[c.include]);
+        }
     }
 }
 
@@ -1312,24 +1356,6 @@ void Generator::resolveType(FunctionBinding::Param* param, string functionName, 
                     __warnings.insert(string("Unrecognized C++ type: ") + functionName + string(" -- ") + (name.size() > 0 ? name : param->info));
                 }
             }
-        }
-    }
-
-    // Ensure that the header for the Lua enum conversion 
-    // functions is included in the file containing the
-    // generated binding that this param/return value is part of.
-    if (param->type == FunctionBinding::Param::TYPE_ENUM)
-    {
-        string enumHeader = string("lua_") + getUniqueName(name) + string(".h");
-        if (_includes.find(header) != _includes.end())
-        {
-            set<string>& includes = _includes[header];
-            if (includes.find(enumHeader) == includes.end())
-                includes.insert(enumHeader);
-        }
-        else
-        {
-            _includes[header].insert(enumHeader);
         }
     }
 }
@@ -1370,6 +1396,29 @@ void Generator::resolveTypes()
             {
                 resolveType(&(*paramIter), functionIter->name, globalHeader);
             }
+        }
+    }
+}
+
+void Generator::buildClassHierarchyPairs()
+{
+    for (map<string, ClassBinding>::iterator iter = _classes.begin(); iter != _classes.end(); ++iter)
+    {
+        const string& baseClassName = iter->first;
+        const vector<string>& derived = iter->second.derived;
+
+        for (size_t i = 0, count = derived.size(); i < count; ++i)
+        {
+            // If the derived class is not in the ref table, it's a hidden/protected class,
+            // so we don't generate it
+            if (_refIds.find(derived[i]) == _refIds.end())
+                continue;
+
+            const string& derviedClassName = getIdentifier(derived[i]);
+
+            // Add pairs in both direction (base->derived and derived->base)
+            _classHierarchyPairs[baseClassName].insert(derviedClassName);
+            _classHierarchyPairs[derviedClassName].insert(baseClassName);
         }
     }
 }
@@ -1416,145 +1465,9 @@ void Generator::generateBindings(string* bindingNS)
         }
     }
 
-    // Go through all the classes and if they have any derived classes, add them to the list of base classes.
-    vector<string> baseClasses;
-    for (map<string, ClassBinding>::iterator iter = _classes.begin(); iter != _classes.end(); iter++)
-    {
-        if (iter->second.derived.size() > 0)
-            baseClasses.push_back(iter->first);
-    }
-
-    // Write out all the enum files.
-    if (_enums.size() > 0)
-    {
-        // Write out the enum conversion function declarations.
-        for (map<string, EnumBinding>::iterator iter = _enums.begin(); iter != _enums.end(); iter++)
-        {
-            if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(iter->first) == _namespaces["gameplay"].end()))
-            {
-                cout << "Generating bindings for '" << iter->first << "'...\n";
-
-                // Header.
-                string enumHStr = _outDir + string("lua_") + getUniqueName(iter->first) + string(".h");
-                ostringstream enumH;
-                includeGuard = string("lua_") + getUniqueName(iter->first) + string("_H_");
-                transform(includeGuard.begin(), includeGuard.end(), includeGuard.begin(), ::toupper);
-                enumH << "#ifndef " << includeGuard << "\n";
-                enumH << "#define " << includeGuard << "\n\n";
-                enumH << "#include \"" << iter->second.include << "\"\n\n";
-
-                if (bindingNS)
-                {
-                    enumH << "namespace " << *bindingNS << "\n";
-                    enumH << "{\n\n";
-                }
-
-                enumH << "// Lua bindings for enum conversion functions for " << iter->first << ".\n";
-                enumH << iter->first << " lua_enumFromString_" << getUniqueName(iter->first) << "(const char* s);\n";
-                enumH << "const char* lua_stringFromEnum_" << getUniqueName(iter->first) << "(" << iter->first << " e);\n\n";
-
-                if (bindingNS)
-                {
-                    enumH << "}\n\n";
-                }
-
-                enumH << "#endif\n";
-
-                writeFile(enumHStr, enumH.str());
-
-                // Implementation.
-                string enumCppStr = _outDir + string("lua_") + getUniqueName(iter->first) + string(".cpp"); 
-                ostringstream enumCpp(enumCppStr.c_str());
-                enumCpp << "#include \"Base.h\"\n";
-                enumCpp << "#include \"lua_" << getUniqueName(iter->first) << ".h\"\n\n";
-
-                if (bindingNS)
-                {
-                    enumCpp << "namespace " << *bindingNS << "\n";
-                    enumCpp << "{\n\n";
-                }
-
-                enumCpp << "static const char* enumStringEmpty = \"\";\n\n";
-
-                // Build the scope string if applicable.
-                string scope;
-                if (iter->second.scopePath.size() > 0)
-                {
-                    for (unsigned int i = 0; i < iter->second.scopePath.size(); i++)
-                    {
-                        scope += iter->second.scopePath[i] + string("::");
-                    }
-                }
-
-                // Write out the string constants that correspond to the enumeration values.
-                for (unsigned int i = 0; i < iter->second.values.size(); i++)
-                {
-                    enumCpp << "static const char* luaEnumString_" << getUniqueName(iter->first) << "_";
-                    enumCpp << iter->second.values[i] << " = \"" << iter->second.values[i] << "\";\n";
-                }
-                enumCpp << "\n";
-
-                enumCpp << iter->first << " lua_enumFromString_" << getUniqueName(iter->first) << "(const char* s)\n";
-                enumCpp << "{\n";
-                
-                for (unsigned int i = 0; i < iter->second.values.size(); i++)
-                {
-                    enumCpp << "    ";
-                        
-                    enumCpp << "if (strcmp(s, luaEnumString_" << getUniqueName(iter->first) << "_" << iter->second.values[i] << ") == 0)\n";
-                    enumCpp << "        return ";
-                    if (scope.size() > 0)
-                        enumCpp << scope;
-                    enumCpp << iter->second.values[i] << ";\n";
-
-                    if (i == iter->second.values.size() - 1)
-                    {
-                        //enumCpp << "    GP_ERROR(\"Invalid enumeration value '%s' for enumeration " << iter->first << ".\", s);\n";
-                        enumCpp << "    return ";
-                        if (scope.size() > 0)
-                            enumCpp << scope;
-                        enumCpp << iter->second.values[0] << ";\n";
-                    }
-                }
-
-                enumCpp << "}\n\n";
-
-                enumCpp << "const char* lua_stringFromEnum_" << getUniqueName(iter->first) << "(" << iter->first << " e)\n";
-                enumCpp << "{\n";
-
-                // Write out the enum-to-string conversion code.
-                for (unsigned int i = 0; i < iter->second.values.size(); i++)
-                {
-                    enumCpp << "    ";
-                        
-                    enumCpp << "if (e == ";
-                    if (scope.size() > 0)
-                        enumCpp << scope;
-                    enumCpp << iter->second.values[i] << ")\n";
-                    enumCpp << "        return luaEnumString_" << getUniqueName(iter->first) << "_" << iter->second.values[i] << ";\n";
-
-                    if (i == iter->second.values.size() - 1)
-                    {
-                        //enumCpp << "    GP_ERROR(\"Invalid enumeration value '%d' for enumeration " << iter->first << ".\", e);\n";
-                        enumCpp << "    return enumStringEmpty;\n";
-                    }
-                }
-
-                enumCpp << "}\n\n";
-
-                if (bindingNS)
-                {
-                    enumCpp << "}\n\n";
-                }
-
-                writeFile(enumCppStr, enumCpp.str());
-            }
-        }
-    }
-
     // Write out the global bindings file.
     cout << "Generating global bindings...\n";
-    if (baseClasses.size() > 0 || _functions.size() > 0 || _enums.size() > 0)
+    if (_classHierarchyPairs.size() > 0 || _functions.size() > 0 || _enums.size() > 0)
     {
         // Calculate if there are global function bindings to write out.
         bool generateGlobalFunctionBindings = false;
@@ -1593,13 +1506,6 @@ void Generator::generateBindings(string* bindingNS)
             global << "#ifndef " << includeGuard << "\n";
             global << "#define " << includeGuard << "\n\n";
 
-            // Write out the needed includes for the global enumeration function.
-            for (map<string, EnumBinding>::iterator iter = _enums.begin(); iter != _enums.end(); iter++)
-            {
-                if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(iter->first) == _namespaces["gameplay"].end()))
-                    global << "#include \"lua_" << getUniqueName(iter->first) << ".h\"\n";
-            }
-            global << "\n";
             luaAllH << "#include \"" << string(LUA_GLOBAL_FILENAME) << ".h\"\n";
             luaAllCpp << "    luaRegister_" << LUA_GLOBAL_FILENAME << "();\n";
 
@@ -1622,14 +1528,14 @@ void Generator::generateBindings(string* bindingNS)
                 global << "\n";
             }
 
-            if (generateEnumBindings)
-            {
-                global << "// Global enum to string conversion function (used to pass enums to Lua from C++).\n";
-                global << "const char* lua_stringFromEnumGlobal(std::string& enumname, unsigned int value);\n\n";
-            }
-            
-            // Write out the signature of the function used to register the global functions with Lua.
+            // Write out global register function signature
             global << "void luaRegister_" << LUA_GLOBAL_FILENAME << "();\n\n";
+
+            // Write out function to get class relatives
+            global << "const std::vector<std::string>& luaGetClassRelatives(const char* type);\n\n";
+
+            // Write out userdata pointer conversion function
+            global << "void* luaConvertObjectPointer(void* ptr, const char* fromType, const char* toType);\n\n";
 
             if (bindingNS)
                 global << "}\n\n";
@@ -1642,16 +1548,42 @@ void Generator::generateBindings(string* bindingNS)
         {
             string path = _outDir + string(LUA_GLOBAL_FILENAME) + string(".cpp");
             ostringstream global;
-            global << "#include \"ScriptController.h\"\n";
-            global << "#include \"" << LUA_GLOBAL_FILENAME << ".h\"\n";
+
+            // Add unique set of global includes
+            vector<string> globalIncludes;
+            globalIncludes.push_back("Base.h");
+            globalIncludes.push_back("ScriptController.h");
+            globalIncludes.push_back(string(LUA_GLOBAL_FILENAME) + ".h");
+
             map<string, set<string> >::iterator iter = _includes.find(string(LUA_GLOBAL_FILENAME) + string(".h"));
             if (iter != _includes.end())
             {
                 set<string>::iterator includeIter = iter->second.begin();
                 for (; includeIter != iter->second.end(); includeIter++)
                 {
-                    global << "#include \"" << *includeIter << "\"\n";
+                    if (std::find(globalIncludes.begin(), globalIncludes.end(), *includeIter) == globalIncludes.end())
+                        globalIncludes.push_back(*includeIter);
                 }
+            }
+
+            for (map<string, EnumBinding>::iterator itr = _enums.begin(); itr != _enums.end(); ++itr)
+            {
+                if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(itr->first) == _namespaces["gameplay"].end()))
+                {
+                    if (std::find(globalIncludes.begin(), globalIncludes.end(), itr->second.include) == globalIncludes.end())
+                        globalIncludes.push_back(itr->second.include);
+                }
+            }
+
+            /*for (std::map<string, ClassBinding>::iterator itr = _classes.begin(); itr != _classes.end(); ++itr)
+            {
+                if (std::find(globalIncludes.begin(), globalIncludes.end(), itr->second.include) == globalIncludes.end())
+                    globalIncludes.push_back(itr->second.include);
+            }*/
+
+            for (vector<string>::iterator itr = globalIncludes.begin(); itr != globalIncludes.end(); ++itr)
+            {
+                global << "#include \"" << *itr << "\"\n";
             }
             global << "\n";
 
@@ -1661,10 +1593,26 @@ void Generator::generateBindings(string* bindingNS)
                 global << "{\n\n";
             }
 
+            // Write the single global implementation of the function to register conversion functions
+            global << "static std::unordered_map<std::string, void*(*)(void*, const char*)> __conversionFunctions;\n\n";
+
+            global << "void " << LUA_GLOBAL_REGISTER_CONVERSION_FUNCTION << "(const char* className, void*(*func)(void*, const char*))\n";
+            global << "{\n";
+            global << "    __conversionFunctions[className] = func;\n";
+            global << "}\n\n";
+
+            // Write out function to store class hierarchy pairs
+            global << "static std::map<std::string, std::vector<std::string> > __hierarchyPairs;\n\n";
+
+            global << "static void setHierarchyPair(const std::string& type1, const std::string& type2)\n";
+            global << "{\n";
+            global << "    __hierarchyPairs[type1].push_back(type2);\n";
+            global << "}\n\n";
+
             // Write out the function used to register all global bindings with Lua.
             global << "void luaRegister_" << LUA_GLOBAL_FILENAME << "()\n";
             global << "{\n";
-        
+
             if (generateGlobalFunctionBindings)
             {
                 // Bind the non-member functions.
@@ -1675,17 +1623,16 @@ void Generator::generateBindings(string* bindingNS)
                 }
             }
 
+            global << "\n";
+
             // Generate the hierarchy map.
-            if (baseClasses.size() > 0)
+            for (std::map<string, set<string> >::iterator iter1 = _classHierarchyPairs.begin(); iter1 != _classHierarchyPairs.end(); ++iter1)
             {
-                for (unsigned int i = 0, count = baseClasses.size(); i < count; i++)
+                for (set<string>::iterator iter2 = iter1->second.begin(); iter2 != iter1->second.end(); ++iter2)
                 {
-                    set<string> derived;
-                    getAllDerived(derived, baseClasses[i]);
-                    for (set<string>::iterator iter = derived.begin(); iter != derived.end(); iter++)
+                    if (generatingGameplay || (!generatingGameplay && _namespaces["gameplay"].find(*iter2) == _namespaces["gameplay"].end()))
                     {
-                        if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(*iter) == _namespaces["gameplay"].end()))
-                            global << "    gameplay::ScriptUtil::setGlobalHierarchyPair(\"" << baseClasses[i] << "\", \"" << *iter << "\");\n";
+                        global << "    setHierarchyPair(\"" << iter1->first << "\", \"" << *iter2 << "\");\n";
                     }
                 }
             }
@@ -1693,11 +1640,6 @@ void Generator::generateBindings(string* bindingNS)
             // Register all enums.
             if (generateEnumBindings)
             {
-                global << "    gameplay::ScriptUtil::addStringFromEnumConversionFunction(&";
-                if (bindingNS)
-                    global << *bindingNS << "::";
-                global << "lua_stringFromEnumGlobal);\n";
-
                 for (map<string, EnumBinding>::iterator iter = _enums.begin(); iter != _enums.end(); iter++)
                 {
                     if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(iter->first) == _namespaces["gameplay"].end()))
@@ -1706,15 +1648,17 @@ void Generator::generateBindings(string* bindingNS)
                         global << "    {\n";
 
                         global << "        std::vector<std::string> scopePath;\n";
+                        string enumClass;
                         for (unsigned int i = 0; i < iter->second.scopePath.size(); i++)
                         {
                             global << "        scopePath.push_back(\"" << iter->second.scopePath[i] << "\");\n";
+                            enumClass += iter->second.scopePath[i] + "::";
                         }
 
                         vector<string>::iterator enumIter = iter->second.values.begin();
                         for (; enumIter != iter->second.values.end(); enumIter++)
                         {
-                            global << "        gameplay::ScriptUtil::registerConstantString(\"" << *enumIter << "\", \"" << *enumIter << "\", scopePath);\n";
+                            global << "        gameplay::ScriptUtil::registerEnumValue(" << enumClass << *enumIter << ", \"" << *enumIter << "\", scopePath);\n";
                         }
 
                         global << "    }\n";
@@ -1722,7 +1666,29 @@ void Generator::generateBindings(string* bindingNS)
                 }
             }
             global << "}\n\n";
-            
+
+            // Write out function to get class relatives list
+            global << "const std::vector<std::string>& luaGetClassRelatives(const char* type)\n";
+            global << "{\n";
+            global << "    return __hierarchyPairs[type];\n";
+            global << "}\n\n";
+
+            // Write out function to get userdata object pointers
+            global << "void* luaConvertObjectPointer(void* ptr, const char* fromType, const char* toType)\n";
+            global << "{\n";
+            global << "    // Need to convert object pointers as follows:\n";
+            global << "    //  1) First, cast from void* to the pre-determined type\n";
+            global << "    //  2) Next, static_cast to the requested relative type\n";
+            global << "    //  3) Finally, cast back to void* so the resulting pointer can be safely cast to the requested type by the caller\n\n";
+
+            global << "    // Try to find a conversion function registered for fromType\n";
+            global << "    std::unordered_map<std::string, void*(*)(void*, const char*)>::iterator itr = __conversionFunctions.find(fromType);\n";
+            global << "    if (itr == __conversionFunctions.end())\n";
+            global << "        return NULL; // no known conversion\n\n";
+
+            global << "    return itr->second(ptr, toType);\n";
+            global << "}\n\n";
+
             // Write out the binding functions.
             if (generateGlobalFunctionBindings)
             {
@@ -1731,27 +1697,6 @@ void Generator::generateBindings(string* bindingNS)
                     if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(iter->second[0].name) == _namespaces["gameplay"].end()))
                         FunctionBinding::write(global, iter->second);
                 }
-            }
-
-            // Write out the global enum conversion function (used to pass enums from C++ to Lua).
-            if (generateEnumBindings)
-            {
-                global << "static const char* enumStringEmpty = \"\";\n\n";
-                global << "const char* lua_stringFromEnumGlobal(std::string& enumname, unsigned int value)\n";
-                global << "{\n";
-                for (map<string, EnumBinding>::iterator iter = _enums.begin(); iter != _enums.end(); iter++)
-                {
-                    if (generatingGameplay || (!generatingGameplay &&  _namespaces["gameplay"].find(iter->first) == _namespaces["gameplay"].end()))
-                    {
-                        global << "    if (enumname == \"";
-                        global << iter->first << "\")\n";
-                        global << "        return lua_stringFromEnum_" << getUniqueName(iter->first) << "((" << iter->first << ")value);\n";
-                    }
-                }
-                global << "\n";
-                global << "    GP_ERROR(\"Unrecognized enumeration type '%s'.\", enumname.c_str());\n";
-                global << "    return enumStringEmpty;\n";
-                global << "}\n\n";
             }
 
             if (bindingNS)
@@ -1780,19 +1725,64 @@ void Generator::generateBindings(string* bindingNS)
     writeFile(luaAllHStr, luaAllH.str());
 }
 
-void Generator::getAllDerived(set<string>& derived, string classname)
+void Generator::getAllDerived(set<string>& out, string classname)
 {
-    for (unsigned int i = 0, count = _classes[classname].derived.size(); i < count; i++)
+    const map<string, ClassBinding>::iterator itr = _classes.find(classname);
+    if (itr == _classes.end())
+        return;
+
+    const vector<string>& derived = itr->second.derived;
+    for (unsigned int i = 0, count = derived.size(); i < count; i++)
     {
         // If the derived class is not in the ref ID table, then it
         // is a hidden (protected, private, etc.) class, so don't include it.
-        if (_refIds.find(_classes[classname].derived[i]) != _refIds.end())
+        if (_refIds.find(derived[i]) != _refIds.end())
         {
-            string derivedClassName = getIdentifier(_classes[classname].derived[i]);
-            derived.insert(derivedClassName);
-            getAllDerived(derived, derivedClassName);
+            string derivedClassName = getIdentifier(derived[i]);
+            out.insert(derivedClassName);
+            getAllDerived(out, derivedClassName);
         }
     }
+}
+
+const set<string>& Generator::getClassRelatives(const string& classname)
+{
+    static set<string> empty;
+
+    const map<string, set<string> >::iterator itr = _classHierarchyPairs.find(classname);
+    if (itr == _classHierarchyPairs.end())
+        return empty;
+
+    return itr->second;
+}
+
+string Generator::getInclude(const string& classname)
+{
+    map<string, ClassBinding>::iterator itr = _classes.find(classname);
+    if (itr == _classes.end())
+        return string();
+
+    return itr->second.include;
+}
+
+bool Generator::hasDerivedClasses(string refId)
+{
+    string classname = getIdentifier(refId);
+    map<string, ClassBinding>::iterator itr = _classes.find(classname);
+    if (itr != _classes.end())
+    {
+        for (size_t i = 0, count = itr->second.derived.size(); i < count; i++)
+        {
+            // If the derived class is not in the ref ID table, then it
+            // is a hidden (protected, private, etc.) class, so don't include it.
+            if (_refIds.find(itr->second.derived[i]) != _refIds.end())
+            {
+                return true; // has at least one public derived class
+            }
+        }
+    }
+
+    return false;
 }
 
 void Generator::getIncludes(XMLElement* e, string filename)

@@ -197,12 +197,12 @@ void Sample::schedule(long timeOffset, TimeListener* timeListener, void* cookie)
 
 void Sample::enableScriptCamera(bool enable)
 {
-	Game::getInstance()->getScriptController()->executeFunction<void>("camera_setActive", "b", enable);
+	Game::getInstance()->getScriptController()->executeFunction<void>("camera_setActive", "b", NULL, enable);
 }
 
 void Sample::setScriptCameraSpeed(float normal, float fast)
 {
-    Game::getInstance()->getScriptController()->executeFunction<void>("camera_setSpeed", "ff", normal, fast);
+    Game::getInstance()->getScriptController()->executeFunction<void>("camera_setSpeed", "ff", NULL, normal, fast);
 }
 
 bool Sample::isGestureSupported(Gesture::GestureEvent evt)
@@ -268,6 +268,6 @@ void Sample::drawFrameRate(Font* font, const Vector4& color, unsigned int x, uns
     char buffer[10];
     sprintf(buffer, "%u", fps);
     font->start();
-    font->drawText(buffer, x, y, color, font->getSize());
+    font->drawText(buffer, x, y, color, 18);
     font->finish();
 }

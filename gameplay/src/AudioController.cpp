@@ -8,7 +8,7 @@ namespace gameplay
 {
 
 AudioController::AudioController() 
-    : _alcDevice(NULL), _alcContext(NULL), _pausingSource(NULL)
+: _alcDevice(NULL), _alcContext(NULL), _pausingSource(NULL), _streamingThreadActive(true)
 {
 }
 
@@ -40,10 +40,19 @@ void AudioController::initialize()
     {
         GP_ERROR("Unable to make OpenAL context current. Error: %d\n", alcErr);
     }
+    _streamingMutex.reset(new std::mutex());
 }
 
 void AudioController::finalize()
 {
+    GP_ASSERT(_streamingSources.empty());
+    if (_streamingThread.get())
+    {
+        _streamingThreadActive = false;
+        _streamingThread->join();
+        _streamingThread.reset(NULL);
+    }
+
     alcMakeContextCurrent(NULL);
     if (_alcContext)
     {
@@ -72,11 +81,17 @@ void AudioController::pause()
         _pausingSource = NULL;
         itr++;
     }
+#ifdef ALC_SOFT_pause_device
+    alcDevicePauseSOFT(_alcDevice);
+#endif
 }
 
 void AudioController::resume()
 {   
     alcMakeContextCurrent(_alcContext);
+#ifdef ALC_SOFT_pause_device
+    alcDeviceResumeSOFT(_alcDevice);
+#endif
 
     std::set<AudioSource*>::iterator itr = _playingSources.begin();
 
@@ -100,6 +115,62 @@ void AudioController::update(float elapsedTime)
         AL_CHECK( alListenerfv(AL_ORIENTATION, (ALfloat*)listener->getOrientation()) );
         AL_CHECK( alListenerfv(AL_VELOCITY, (ALfloat*)&listener->getVelocity()) );
         AL_CHECK( alListenerfv(AL_POSITION, (ALfloat*)&listener->getPosition()) );
+    }
+}
+
+void AudioController::addPlayingSource(AudioSource* source)
+{
+    if (_playingSources.find(source) == _playingSources.end())
+    {
+        _playingSources.insert(source);
+
+        if (source->isStreamed())
+        {
+            GP_ASSERT(_streamingSources.find(source) == _streamingSources.end());
+            bool startThread = _streamingSources.empty() && _streamingThread.get() == NULL;
+            _streamingMutex->lock();
+            _streamingSources.insert(source);
+            _streamingMutex->unlock();
+
+            if (startThread)
+                _streamingThread.reset(new std::thread(&streamingThreadProc, this));
+        }
+    }
+}
+
+void AudioController::removePlayingSource(AudioSource* source)
+{
+    if (_pausingSource != source)
+    {
+        std::set<AudioSource*>::iterator iter = _playingSources.find(source);
+        if (iter != _playingSources.end())
+        {
+            _playingSources.erase(iter);
+ 
+            if (source->isStreamed())
+            {
+                GP_ASSERT(_streamingSources.find(source) != _streamingSources.end());
+                _streamingMutex->lock();
+                _streamingSources.erase(source);
+                _streamingMutex->unlock();
+            }
+        }
+    } 
+}
+
+void AudioController::streamingThreadProc(void* arg)
+{
+    AudioController* controller = (AudioController*)arg;
+
+    while (controller->_streamingThreadActive)
+    {
+        controller->_streamingMutex->lock();
+
+        std::for_each(controller->_streamingSources.begin(), controller->_streamingSources.end(), std::mem_fn(&AudioSource::streamDataIfNeeded));
+        
+        controller->_streamingMutex->unlock();
+   
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 

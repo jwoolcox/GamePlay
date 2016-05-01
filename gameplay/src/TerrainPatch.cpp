@@ -48,7 +48,12 @@ TerrainPatch::~TerrainPatch()
     {
         deleteLayer(*_layers.begin());
     }
-    SAFE_RELEASE(_camera);
+    
+    if (_camera != NULL)
+    {
+    	_camera->removeListener(this);
+    	SAFE_RELEASE(_camera);
+    }
 }
 
 TerrainPatch* TerrainPatch::create(Terrain* terrain, unsigned int index,
@@ -197,8 +202,8 @@ void TerrainPatch::addLOD(float* heights, unsigned int width, unsigned int heigh
             v += 3;
 
             // Compute texture coord
-            v[0] = (float)x / width;
-            v[1] = 1.0f - (float)z / height;
+            v[0] = (float)x / (width-1);
+            v[1] = 1.0f - (float)z / (height-1);
             if (xskirt)
             {
                 float offset = verticalSkirtSize / width;
@@ -384,6 +389,13 @@ int TerrainPatch::addSampler(const char* path)
     if (!texture)
         return -1;
 
+    // Textures should only be 2D
+    if (texture->getType() != Texture::TEXTURE_2D)
+    {
+        SAFE_RELEASE(texture);
+        return -1;
+    }
+
     int firstAvailableIndex = -1;
     for (size_t i = 0, count = _samplers.size(); i < count; ++i)
     {
@@ -407,6 +419,9 @@ int TerrainPatch::addSampler(const char* path)
     // Add a new sampler to the list
     Texture::Sampler* sampler = Texture::Sampler::create(texture);
     texture->release();
+
+    // This may need to be clamp in some cases to prevent edge bleeding?  Possibly a
+    // configuration variable in the future.
     sampler->setWrapMode(Texture::REPEAT, Texture::REPEAT);
     sampler->setFilterMode(Texture::LINEAR_MIPMAP_LINEAR, Texture::LINEAR);
     if (firstAvailableIndex != -1)
@@ -704,11 +719,13 @@ bool TerrainAutoBindingResolver::resolveAutoBinding(const char* autoBinding, Nod
     {
         static TerrainPatch* getPatch(Node* node)
         {
-            Terrain* terrain = node->getTerrain();
+            Terrain* terrain = dynamic_cast<Terrain*>(node->getDrawable());
             if (terrain)
             {
                 if (__currentPatchIndex >= 0 && __currentPatchIndex < (int)terrain->_patches.size())
+                {
                     return terrain->_patches[__currentPatchIndex];
+                }
             }
             return NULL;
         }
@@ -723,7 +740,7 @@ bool TerrainAutoBindingResolver::resolveAutoBinding(const char* autoBinding, Nod
     }
     else if (strcmp(autoBinding, "TERRAIN_NORMAL_MAP") == 0)
     {
-        Terrain* terrain = node->getTerrain();
+        Terrain* terrain = dynamic_cast<Terrain*>(node->getDrawable());
         if (terrain && terrain->_normalMap)
             parameter->setValue(terrain->_normalMap);
         return true;

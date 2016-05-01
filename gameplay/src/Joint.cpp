@@ -1,6 +1,7 @@
 #include "Base.h"
 #include "Joint.h"
 #include "MeshSkin.h"
+#include "Model.h"
 
 namespace gameplay
 {
@@ -32,6 +33,11 @@ Node* Joint::cloneSingleNode(NodeCloneContext &context) const
 Node::Type Joint::getType() const
 {
     return Node::JOINT;
+}
+
+const char* Joint::getTypeName() const
+{
+    return "Joint";
 }
 
 Scene* Joint::getScene() const

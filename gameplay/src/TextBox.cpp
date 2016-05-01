@@ -4,12 +4,7 @@
 namespace gameplay
 {
 
-static bool space(char c)
-{
-    return isspace(c);
-}
-
-TextBox::TextBox() : _caretLocation(0), _lastKeypress(0), _fontSize(0), _caretImage(NULL), _passwordChar('*'), _inputMode(TEXT), _ctrlPressed(false)
+TextBox::TextBox() : _caretLocation(0), _lastKeypress(0), _fontSize(0), _caretImage(NULL), _passwordChar('*'), _inputMode(TEXT), _ctrlPressed(false), _shiftPressed(false)
 {
     _canFocus = true;
 }
@@ -43,6 +38,21 @@ void TextBox::initialize(const char* typeName, Theme::Style* style, Properties* 
 	}
 }
 
+const char* TextBox::getTypeName() const
+{
+    return "TextBox";
+}
+
+void TextBox::addListener(Control::Listener* listener, int eventFlags)
+{
+    if ((eventFlags & Control::Listener::VALUE_CHANGED) == Control::Listener::VALUE_CHANGED)
+    {
+        GP_ERROR("VALUE_CHANGED event is not applicable to this control.");
+    }
+
+    Control::addListener(listener, eventFlags);
+}
+
 int TextBox::getLastKeypress()
 {
     return _lastKeypress;
@@ -62,22 +72,18 @@ void TextBox::setCaretLocation(unsigned int index)
 
 bool TextBox::touchEvent(Touch::TouchEvent evt, int x, int y, unsigned int contactIndex)
 {
-    State state = getState();
-
-    switch (evt)
-    {
-    case Touch::TOUCH_PRESS: 
-        if (state == ACTIVE)
+    if (getState() == ACTIVE) {
+        switch (evt)
         {
+        case Touch::TOUCH_PRESS:
             setCaretLocation(x, y);
-        }
-        break;
-    case Touch::TOUCH_MOVE:
-        if (state == ACTIVE)
-        {
+            break;
+        case Touch::TOUCH_MOVE:
             setCaretLocation(x, y);
+            break;
+        default:
+            break;
         }
-        break;
     }
 
     return Label::touchEvent(evt, x, y, contactIndex);
@@ -139,6 +145,11 @@ bool TextBox::keyEvent(Keyboard::KeyEvent evt, int key)
         {
             switch (key)
             {
+            	case Keyboard::KEY_SHIFT:
+            	{
+                    _shiftPressed = true;
+                    break;
+            	}
                 case Keyboard::KEY_CTRL:
                 {
                     _ctrlPressed = true;
@@ -246,6 +257,7 @@ bool TextBox::keyEvent(Keyboard::KeyEvent evt, int key)
             {
                 case Keyboard::KEY_RETURN:
                     // TODO: Support multi-line
+                    notifyListeners(Control::Listener::ACTIVATED);
                     break;
                 case Keyboard::KEY_ESCAPE:
                     break;
@@ -256,6 +268,11 @@ bool TextBox::keyEvent(Keyboard::KeyEvent evt, int key)
                     return false;
                 default:
                 {
+                    // Insert character into string, only if our font supports this character
+                    if (_shiftPressed && islower(key))
+                    {
+                        key = toupper(key);
+                    }
                     // Insert character into string, only if our font supports this character
                     if (_font && _font->isCharacterSupported(key))
                     {
@@ -277,6 +294,11 @@ bool TextBox::keyEvent(Keyboard::KeyEvent evt, int key)
         case Keyboard::KEY_RELEASE:
             switch (key)
             {
+            	case Keyboard::KEY_SHIFT:
+            	{
+                    _shiftPressed = false;
+                    break;
+             	 }
                 case Keyboard::KEY_CTRL:
                 {
                     _ctrlPressed = false;
@@ -302,6 +324,8 @@ void TextBox::controlEvent(Control::Listener::EventType evt)
 
     case Control::Listener::FOCUS_LOST:
         Game::getInstance()->displayKeyboard(false);
+        break;
+    default:
         break;
     }
 }
@@ -362,13 +386,23 @@ unsigned int TextBox::drawText(Form* form, const Rectangle& clip)
 
         SpriteBatch* batch = _font->getSpriteBatch(fontSize);
         startBatch(form, batch);
-        _font->drawText(displayedText.c_str(), _textBounds, _textColor, fontSize, getTextAlignment(state), true, getTextRightToLeft(state), &_viewportClipBounds);
+        _font->drawText(displayedText.c_str(), _textBounds, _textColor, fontSize, getTextAlignment(state), true, getTextRightToLeft(state), _viewportClipBounds);
         finishBatch(form, batch);
 
         return 1;
     }
 
     return 0;
+}
+
+void TextBox::setText(char const *text)
+{
+    Label::setText(text);
+    if (_caretLocation > _text.length())
+    {
+        _caretLocation = _text.length();
+    }
+    notifyListeners(Control::Listener::TEXT_CHANGED);
 }
 
 void TextBox::setCaretLocation(int x, int y)
@@ -427,7 +461,13 @@ void TextBox::setCaretLocation(int x, int y)
     }
 
     if (index != -1)
+    {
         _caretLocation = index;
+    }
+    else
+    {
+        _caretLocation = _text.length();
+    }
 }
 
 void TextBox::getCaretLocation(Vector2* p)
@@ -436,11 +476,6 @@ void TextBox::getCaretLocation(Vector2* p)
 
     State state = getState();
     getFont(state)->getLocationAtIndex(getDisplayedText().c_str(), _textBounds, getFontSize(state), p, _caretLocation, getTextAlignment(state), true, getTextRightToLeft(state));
-}
-
-const char* TextBox::getType() const
-{
-    return "textBox";
 }
 
 void TextBox::setPasswordChar(char character)
